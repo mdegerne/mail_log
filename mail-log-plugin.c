@@ -410,16 +410,24 @@ mail_log_transaction_commit(struct mailbox_transaction_context *t,
 {
 	struct mail_log_transaction_context *lt = MAIL_LOG_CONTEXT(t);
 	union mailbox_module_context *lbox = MAIL_LOG_CONTEXT(t->box);
+        int _commit;
+        bool logging = FALSE;
 
-	if (lt != NULL) {
+        if (lt != NULL) {
 		if (lt->changes > 0 && mail_log_set.group_events)
 			mail_log_group_changes(t->box, lt);
 		pool_unref(&lt->pool);
-	}
+                logging = TRUE;
+        }
 
-	return lbox->super.transaction_commit(t, uid_validity_r,
+	_commit =  lbox->super.transaction_commit(t, uid_validity_r,
 					      first_saved_uid_r,
 					      last_saved_uid_r);
+        if(logging && _commit >= 0) {
+            /* log saved_uid's */
+            i_info("Transaction succeeded: First uid: %d, Last uid: %d",*first_saved_uid_r,*last_saved_uid_r);
+        }
+        return _commit;
 }
 
 static void
