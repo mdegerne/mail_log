@@ -200,13 +200,11 @@ static void mail_log_append_mailbox_name(string_t *str, struct mailbox *box)
 }
 
 static void
-mail_log_group(struct mailbox *box, const struct mail_log_group_changes *group)
+mail_log_group(struct mailbox *box, const struct mail_log_group_changes *group, string_t *str)
 {
 	const struct seq_range *range;
 	unsigned int i, count;
-	string_t *str;
 	
-	str = t_str_new(128);
 	str_printfa(str, "%s: ", mail_log_event_get_name(group->event));
 
 	if ((mail_log_set.fields & MAIL_LOG_FIELD_UID) != 0 &&
@@ -235,14 +233,13 @@ mail_log_group(struct mailbox *box, const struct mail_log_group_changes *group)
 		str_printfa(str, "size=%"PRIuUOFF_T", ", group->psize_total);
 	if (group->vsize_total != 0)
 		str_printfa(str, "size=%"PRIuUOFF_T", ", group->vsize_total);
-	str_truncate(str, str_len(str)-2);
+	/*str_truncate(str, str_len(str)-2);*/
 
-	i_info("%s", str_c(str));
 }
 
 static void
 mail_log_group_changes(struct mailbox *box,
-		       struct mail_log_transaction_context *lt)
+		       struct mail_log_transaction_context *lt,string_t *str)
 {
 	const struct mail_log_group_changes *group;
 	unsigned int i, count;
@@ -250,7 +247,7 @@ mail_log_group_changes(struct mailbox *box,
 	group = array_get(&lt->group_changes, &count);
 	for (i = 0; i < count; i++) {
 		T_BEGIN {
-			mail_log_group(box, &group[i]);
+			mail_log_group(box, &group[i], str);
 		} T_END;
 	}
 }
@@ -412,20 +409,29 @@ mail_log_transaction_commit(struct mailbox_transaction_context *t,
 	union mailbox_module_context *lbox = MAIL_LOG_CONTEXT(t->box);
         int _commit;
         bool logging = FALSE;
+	string_t *str,*str2;
+	
 
         if (lt != NULL) {
+	        str = str_new(lt->pool,128);
+	        str2 = str_new(lt->pool,158);
 		if (lt->changes > 0 && mail_log_set.group_events)
-			mail_log_group_changes(t->box, lt);
-		pool_unref(&lt->pool);
+			mail_log_group_changes(t->box, lt,str);
                 logging = TRUE;
         }
 
 	_commit =  lbox->super.transaction_commit(t, uid_validity_r,
 					      first_saved_uid_r,
 					      last_saved_uid_r);
-        if(logging && _commit >= 0) {
-            /* log saved_uid's */
-            i_info("Transaction succeeded: First uid: %d, Last uid: %d",*first_saved_uid_r,*last_saved_uid_r);
+        if (logging) {
+	    str_truncate(str, str_len(str)-2);
+            if (_commit == 0) {
+                str_printfa(str2, "%s: Transaction succeeded: First uid: %u, Last uid: %u",str_c(str),*first_saved_uid_r,*last_saved_uid_r);
+            } else {
+                str_printfa(str2,"%s: Failed",str_c(str));
+            }
+            i_info("%s",str_c(str2));
+            pool_unref(&lt->pool);
         }
         return _commit;
 }
