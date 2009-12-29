@@ -38,8 +38,11 @@ enum mail_log_event {
 	MAIL_LOG_EVENT_COPY		= 0x08,
 	MAIL_LOG_EVENT_MAILBOX_DELETE	= 0x10,
 	MAIL_LOG_EVENT_MAILBOX_RENAME	= 0x20,
+	MAIL_LOG_EVENT_MAIL_ALLOC	= 0x40,
+	MAIL_LOG_EVENT_SAVE_INIT	= 0x80,
+	MAIL_LOG_EVENT_SAVE_FINISH	= 0x100,
 
-	MAIL_LOG_EVENT_MASK_ALL		= 0x1f
+	MAIL_LOG_EVENT_MASK_ALL		= 0x13f
 };
 #define MAIL_LOG_DEFAULT_EVENTS MAIL_LOG_EVENT_MASK_ALL
 
@@ -58,6 +61,10 @@ static const char *event_names[] = {
 	"expunge",
 	"copy",
 	"mailbox_delete",
+	"mailbox_rename",
+	"mail_alloc",
+	"save_init",
+	"append",
 	NULL
 };
 
@@ -170,7 +177,8 @@ mail_log_action_add_group(struct mail_log_transaction_context *lt,
 	if ((mail_log_set.fields & MAIL_LOG_FIELD_UID) != 0) {
 		if (!array_is_created(&group->uids))
 			p_array_init(&group->uids, lt->pool, 32);
-		seq_range_array_add(&group->uids, 0, mail->uid);
+                if (event != MAIL_LOG_EVENT_SAVE_FINISH)
+		    seq_range_array_add(&group->uids, 0, mail->uid);
 	}
 
 	if ((mail_log_set.fields & MAIL_LOG_FIELD_PSIZE) != 0 &&
@@ -381,6 +389,21 @@ mail_log_mail_alloc(struct mailbox_transaction_context *t,
 }
 
 static int
+mail_log_save_finish(struct mail_save_context *ctx)
+{
+	union mailbox_module_context *lbox = MAIL_LOG_CONTEXT(ctx->transaction->box);
+	const char *name;
+	if (lbox->super.save_finish(ctx) < 0)
+            return -1;
+	T_BEGIN {
+		name = str_sanitize(mailbox_get_name(ctx->transaction->box),
+				    MAILBOX_NAME_LOG_LEN);
+		mail_log_action(ctx->transaction, ctx->dest_mail, MAIL_LOG_EVENT_SAVE_FINISH, name);
+	} T_END;
+        return 0;
+}
+
+static int
 mail_log_copy(struct mailbox_transaction_context *t, struct mail *mail,
 	      enum mail_flags flags, struct mail_keywords *keywords,
 	      struct mail *dest_mail)
@@ -426,12 +449,14 @@ mail_log_transaction_commit(struct mailbox_transaction_context *t,
         if (logging) {
 	    str_truncate(str, str_len(str)-2);
             if (_commit == 0) {
-                str_printfa(str2, "%s: Transaction succeeded: First uid: %u, Last uid: %u",str_c(str),*first_saved_uid_r,*last_saved_uid_r);
+                str_printfa(str2, "%s: Transaction succeeded: first_uid: %u, last_uid: %u, uidvalidity: %u",str_c(str),*first_saved_uid_r,*last_saved_uid_r,*uid_validity_r);
             } else {
                 str_printfa(str2,"%s: Failed",str_c(str));
             }
             i_info("%s",str_c(str2));
             pool_unref(&lt->pool);
+        } else if (*first_saved_uid_r != 0) {
+            i_info("Something happened with first_uid: %u, last_uid: %u, uidvalidity: %u",*first_saved_uid_r,*last_saved_uid_r,*uid_validity_r);
         }
         return _commit;
 }
@@ -470,6 +495,7 @@ mail_log_mailbox_open(struct mail_storage *storage, const char *name,
 
 	box->v.mail_alloc = mail_log_mail_alloc;
 	box->v.copy = mail_log_copy;
+	box->v.save_finish = mail_log_save_finish;
 	box->v.transaction_commit = mail_log_transaction_commit;
 	box->v.transaction_rollback = mail_log_transaction_rollback;
 	MODULE_CONTEXT_SET_SELF(box, mail_log_storage_module, lbox);
@@ -496,7 +522,6 @@ mail_log_mailbox_list_rename(struct mailbox_list *list, const char *oldname,
 			     const char *newname)
 {
 	union mailbox_list_module_context *llist = MAIL_LOG_LIST_CONTEXT(list);
-
 	if (llist->super.rename_mailbox(list, oldname, newname) < 0)
 		return -1;
 
